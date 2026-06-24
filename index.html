@@ -27,30 +27,22 @@
   <!-- Google Fonts (Plus Jakarta Sans) -->
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          fontFamily: {
-            sans: ['"Plus Jakarta Sans"', 'sans-serif'],
-          },
-          colors: {
-            brand: {
-              50: '#f0f7ff',
-              100: '#e0effe',
-              500: '#0284c7',
-              600: '#025a91',
-              700: '#0369a1',
-              800: '#075985',
-              900: '#0c4a6e',
-            }
-          }
-        }
-      }
-    }
-  </script>
-
   <style>
+    /* Konfigurasi Font & Warna Kustom yang Aman dari Race Condition */
+    body {
+      font-family: "Plus Jakarta Sans", sans-serif;
+    }
+    .bg-brand-50 { background-color: #f0f7ff; }
+    .bg-brand-100 { background-color: #e0effe; }
+    .bg-brand-500 { background-color: #0284c7; }
+    .bg-brand-600 { background-color: #025a91; }
+    .bg-brand-700 { background-color: #0369a1; }
+    .bg-brand-800 { background-color: #075985; }
+    .bg-brand-900 { background-color: #0c4a6e; }
+    .text-brand-500 { color: #0284c7; }
+    .text-brand-600 { color: #025a91; }
+    .text-brand-700 { color: #0369a1; }
+
     @media print {
       body {
         background: white !important;
@@ -98,8 +90,14 @@
 
   <script type="text/babel" data-presets="classic-react" data-type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // =========================================================================
+    // KODE API GOOGLE APPS SCRIPT (URL AKTIF ANDA YANG DIGUNAKAN)
+    // =========================================================================
+    const HARDCODED_SHEET_API_URL = "https://script.google.com/macros/s/AKfycbx1K9hm5PyIr1-c4lwfqf8S92Rn8ZTpaWj9h8EToxZ3hosfE7lpOiozeh4BRQ5QsJ8l/exec"; 
+    // =========================================================================
 
     const { useState, useEffect, useRef, useMemo } = React;
 
@@ -234,8 +232,9 @@
 
       const [currentTime, setCurrentTime] = useState(new Date());
 
-      const [isSimulationMode, setIsSimulationMode] = useState(true); 
+      const [isSimulationMode, setIsSimulationMode] = useState(false); 
       const [gpsCoords, setGpsCoords] = useState({ latitude: SCHOOL_COORDS.latitude, longitude: SCHOOL_COORDS.longitude });
+      
       const [schoolCoords, setSchoolCoords] = useState(() => {
         const saved = localStorage.getItem('school_coords');
         return saved ? JSON.parse(saved) : SCHOOL_COORDS;
@@ -245,8 +244,9 @@
         return saved ? parseInt(saved) : MAX_RADIUS_METERS;
       });
       
+      // Mengambil dari LocalStorage, jika kosong otomatis menggunakan tautan asli Anda yang baru ditanamkan
       const [sheetApiUrl, setSheetApiUrl] = useState(() => {
-        return localStorage.getItem('absen_guru_sheet_api_url') || "";
+        return localStorage.getItem('absen_guru_sheet_api_url') || HARDCODED_SHEET_API_URL;
       });
       const [tempSheetApiUrl, setTempSheetApiUrl] = useState(sheetApiUrl);
       const [testingConnection, setTestingConnection] = useState(false);
@@ -293,16 +293,61 @@
         setModal({ isOpen: true, title, message, onConfirm: null, type: 'alert' });
       };
 
+      // SINKRONISASI KONFIGURASI DARI CLOUD FIRESTORE
+      useEffect(() => {
+        if (isLocal) return;
+        if (!user) return;
+
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'school_config');
+        const unsubSettings = onSnapshot(docRef, (docSnap) => {
+          if (docSnap.exists()) {
+            const cloudData = docSnap.data();
+            if (cloudData.schoolCoords) setSchoolCoords(cloudData.schoolCoords);
+            if (cloudData.allowedRadius) setAllowedRadius(cloudData.allowedRadius);
+            if (cloudData.sheetApiUrl !== undefined && cloudData.sheetApiUrl !== "") {
+              setSheetApiUrl(cloudData.sheetApiUrl);
+              localStorage.setItem('absen_guru_sheet_api_url', cloudData.sheetApiUrl);
+            }
+          }
+        }, (err) => {
+          console.error("Gagal mengambil data konfigurasi dari cloud:", err);
+        });
+
+        return () => unsubSettings();
+      }, [user, isLocal]);
+
+      // Jalankan pencarian GPS perangkat secara berkala jika tidak dalam mode simulasi
+      useEffect(() => {
+        if (!isSimulationMode) {
+          requestRealGpsLocation();
+        }
+      }, [isSimulationMode, schoolCoords, allowedRadius]);
+
+      // Pastikan form input sinkron saat state pusat berubah dari Firestore
+      useEffect(() => {
+        setTempSchoolCoords(schoolCoords);
+      }, [schoolCoords]);
+
+      useEffect(() => {
+        setTempRadius(allowedRadius);
+      }, [allowedRadius]);
+
+      useEffect(() => {
+        setTempSheetApiUrl(sheetApiUrl);
+      }, [sheetApiUrl]);
+
       // FUNGSI UTAMA PENYIMPANAN KE GOOGLE SHEET
       const saveToSheet = async (data) => {
-        if (!sheetApiUrl || sheetApiUrl.trim() === "") {
-          console.warn("SHEET_API belum dikonfigurasi.");
+        if (!sheetApiUrl || sheetApiUrl.trim() === "" || sheetApiUrl.includes("XXXXXXXXXXXXXX")) {
+          console.warn("SHEET_API belum dikonfigurasi dengan benar.");
           return false;
         }
         try {
-          await fetch(sheetApiUrl, {
+          // Menggunakan redirect follow untuk mengamankan respons Google Apps Script Web App
+          const response = await fetch(sheetApiUrl, {
             method: "POST",
             mode: "no-cors",
+            redirect: "follow",
             headers: { "Content-Type": "text/plain" },
             body: JSON.stringify(data)
           });
@@ -313,10 +358,17 @@
         }
       };
 
-      // Fungsi Uji Coba Koneksi Integrasi dari Admin Panel
+      // Fungsi Uji Coba Koneksi Integrasi dari Admin Panel (Diperbarui dengan Verifikasi Format URL)
       const testSheetConnection = async () => {
         if (!tempSheetApiUrl || tempSheetApiUrl.trim() === "") {
           setTestResult({ status: "error", message: "Masukkan link URL Google Sheets API terlebih dahulu." });
+          return;
+        }
+        if (!tempSheetApiUrl.startsWith("https://script.google.com/macros/s/")) {
+          setTestResult({ 
+            status: "error", 
+            message: "Format URL salah! Anda memasukkan link Spreadsheet pengeditan. Harap pastekan URL Web App hasil 'Deploy' di Apps Script Anda (yang diawali dengan 'https://script.google.com/macros/s/...')." 
+          });
           return;
         }
         setTestingConnection(true);
@@ -325,13 +377,14 @@
           await fetch(tempSheetApiUrl, {
             method: "POST",
             mode: "no-cors",
+            redirect: "follow",
             headers: { "Content-Type": "text/plain" },
             body: JSON.stringify({ action: "ping" })
           });
           
           setTestResult({ 
             status: "success", 
-            message: "Uji coba pengiriman berhasil dikirim! Silakan periksa apakah tab 'Absensi' atau 'Jurnal KBM' di Spreadsheet Anda telah otomatis terbentuk." 
+            message: "Uji coba pengiriman berhasil dikirim ke server Google Apps Script! Silakan periksa apakah Spreadsheet Anda telah otomatis membuat tab baru bernama 'Absensi'." 
           });
         } catch (err) {
           setTestResult({ 
@@ -355,7 +408,7 @@
         );
       };
 
-      // Fungsi Log Keluar Admin (Pembetulan Ralat handleAdminLogout)
+      // Fungsi Log Keluar Admin
       const handleAdminLogout = () => {
         setRole(null);
         setAdminTab('dashboard');
@@ -440,13 +493,6 @@
         return () => { unsubGuru(); unsubAbsensi(); unsubJurnal(); };
       }, [user, isLocal]);
 
-      useEffect(() => {
-        localStorage.setItem('school_coords', JSON.stringify(schoolCoords));
-        localStorage.setItem('allowed_radius', allowedRadius.toString());
-        setTempSchoolCoords(schoolCoords);
-        setTempRadius(allowedRadius);
-      }, [schoolCoords, allowedRadius]);
-
       const updateLocationDetails = (lat, lon) => {
         const dist = calculateDistance(lat, lon, schoolCoords.latitude, schoolCoords.longitude);
         setDistanceToSchool(dist);
@@ -476,14 +522,19 @@
             setGpsCoords({ latitude, longitude });
             updateLocationDetails(latitude, longitude);
             setLoadingGps(false);
-            triggerToast("GPS berhasil disinkronkan.");
+            setGpsError(null);
+            triggerToast("Lokasi GPS asli berhasil diperbarui.");
           },
           (err) => {
-            setIsSimulationMode(true);
             setLoadingGps(false);
-            triggerToast("Gagal membaca GPS asli. Mode simulasi diaktifkan otomatis.");
+            let errMsg = "Akses lokasi ditolak. Aktifkan GPS dan izinkan izin browser.";
+            if (err.code === 1) errMsg = "Izin lokasi ditolak oleh pengguna/browser.";
+            else if (err.code === 2) errMsg = "Posisi GPS tidak ditemukan (sinyal lemah).";
+            else if (err.code === 3) errMsg = "Waktu tunggu pencarian GPS habis.";
+            setGpsError(errMsg);
+            triggerToast("Gagal membaca GPS asli. Pastikan izin lokasi aktif.");
           },
-          { enableHighAccuracy: true, timeout: 8000 }
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
         );
       };
 
@@ -516,16 +567,53 @@
         setIsCameraActive(false);
       };
 
+      // FUNGSI KOMPRESI & UKURAN GAMBAR (PENTING: Mengurangi ukuran data agar pengiriman 100% lancar & hemat kuota)
+      const resizeAndCompressImage = (dataUrl, callback) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          // Ukuran diturunkan 75% dari lebar 320px menjadi maks 240px agar pengiriman data instan & super ringan
+          const max_width = 240; 
+          const max_height = 180;
+          let width = img.width;
+          let height = img.height;
+          
+          if (width > height) {
+            if (width > max_width) {
+              height *= max_width / width;
+              width = max_width;
+            }
+          } else {
+            if (height > max_height) {
+              width *= max_height / height;
+              height = max_height;
+            }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          // Kompresi kualitas gambar JPEG diturunkan ke 35% (0.35) agar ukuran berkas hanya sekitar 8KB - 12KB
+          callback(canvas.toDataURL('image/jpeg', 0.35));
+        };
+        img.src = dataUrl;
+      };
+
       const capturePhoto = () => {
         if (!videoRef.current) return;
         const canvas = document.createElement('canvas');
-        canvas.width = videoRef.current.videoWidth || 640;
-        canvas.height = videoRef.current.videoHeight || 480;
+        canvas.width = 320;
+        canvas.height = 240;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-        setCapturedPhoto(canvas.toDataURL('image/jpeg', 0.8));
-        stopCamera();
-        triggerToast("Foto selfie siap!");
+        
+        // Kompresi otomatis hasil jepretan kamera langsung
+        const rawDataUrl = canvas.toDataURL('image/jpeg', 0.5);
+        resizeAndCompressImage(rawDataUrl, (compressedDataUrl) => {
+          setCapturedPhoto(compressedDataUrl);
+          stopCamera();
+          triggerToast("Foto selfie berhasil dikompresi!");
+        });
       };
 
       const handleFileUpload = (e) => {
@@ -533,8 +621,11 @@
         if (!file) return;
         const reader = new FileReader();
         reader.onload = (event) => {
-          setCapturedPhoto(event.target.result);
-          triggerToast("Foto berhasil dimuat.");
+          // Kompresi otomatis untuk foto berukuran besar dari galeri
+          resizeAndCompressImage(event.target.result, (compressedDataUrl) => {
+            setCapturedPhoto(compressedDataUrl);
+            triggerToast("Foto galeri berhasil dikompresi!");
+          });
         };
         reader.readAsDataURL(file);
       };
@@ -571,7 +662,9 @@
           nama: activeGuru.nama
         };
 
-        triggerToast("Menyimpan ke Google Sheets & Drive...");
+        triggerToast("Mengunggah foto selfie & mengirim koordinat GPS ke Google Drive & Sheets...");
+        
+        // Panggilan Pengiriman API (Mengirim data koordinat real-time & swafoto base64 ke Apps Script)
         const isSynced = await saveToSheet({
           action: "absensi",
           ...newAbsen
@@ -595,7 +688,7 @@
         setCapturedPhoto(null);
         showAlertModal(
           "Presensi Sukses", 
-          `Anda berhasil absen ${jenis} pukul ${timeStr}.${isSynced ? ' Data terarsip otomatis di Google Sheets & Drive!' : ' Absensi dicadangkan di memori lokal.'}`
+          `Anda berhasil absen ${jenis} pukul ${timeStr}.${isSynced ? ' Foto Anda telah terunggah ke Google Drive dan koordinat GPS tercatat di Google Sheets!' : ' Absensi dicadangkan di memori lokal.'}`
         );
       };
 
@@ -679,13 +772,36 @@
         setAdminPasswordInput('');
       };
 
-      const handleUpdateSchoolSettings = (e) => {
+      // MENYIMPAN PENGATURAN SECARA PERMANEN KE CLOUD & LOKAL
+      const handleUpdateSchoolSettings = async (e) => {
         e.preventDefault();
         setSchoolCoords(tempSchoolCoords);
         setAllowedRadius(parseInt(tempRadius));
         setSheetApiUrl(tempSheetApiUrl);
+
+        // Selalu simpan di LocalStorage
+        localStorage.setItem('school_coords', JSON.stringify(tempSchoolCoords));
+        localStorage.setItem('allowed_radius', tempRadius.toString());
         localStorage.setItem('absen_guru_sheet_api_url', tempSheetApiUrl);
-        showAlertModal("Pengaturan Berhasil", "Sistem geofencing dan integrasi Google Sheets telah disimpan.");
+
+        // Jika online, simpan secara permanen ke Cloud Firestore
+        if (!isLocal && user) {
+          try {
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'school_config');
+            await setDoc(docRef, {
+              schoolCoords: tempSchoolCoords,
+              allowedRadius: parseInt(tempRadius),
+              sheetApiUrl: tempSheetApiUrl
+            }, { merge: true });
+            
+            showAlertModal("Pengaturan Tersimpan", "Konfigurasi GPS Geofencing & Google Sheets API telah tersimpan secara permanen di Cloud Database!");
+          } catch (err) {
+            console.error("Gagal menyimpan ke cloud Firestore:", err);
+            showAlertModal("Tersimpan secara Lokal", "Gagal mengunggah konfigurasi ke cloud. Pengaturan saat ini disimpan di penyimpanan lokal browser Anda.");
+          }
+        } else {
+          showAlertModal("Pengaturan Berhasil", "Sistem geofencing dan integrasi Google Sheets telah disimpan di penyimpanan lokal browser.");
+        }
       };
 
       const personalReports = useMemo(() => {
@@ -841,7 +957,7 @@
                   {/* Indikator status link API Google Sheets */}
                   <div className="text-[10px] font-bold px-3 py-1.5 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-100 flex items-center gap-1.5 shadow-sm">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    {sheetApiUrl ? "Google Sheets" : "Mode Offline Lokal"}
+                    {sheetApiUrl && !sheetApiUrl.includes("XXXXXXXXXXXXXX") ? "Google Sheets (Cloud Aktif)" : "Format API Salah / Non-aktif"}
                   </div>
                   <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 px-4 py-2 rounded-2xl text-xs font-semibold tracking-wider text-sky-600 font-mono shadow-sm">
                     {currentTime.toLocaleTimeString('id-ID')}
@@ -869,10 +985,15 @@
 
                   <div className="bg-white p-4 rounded-3xl border border-slate-200 max-w-sm w-full space-y-3 shadow-sm">
                     <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-black text-sky-600 uppercase tracking-wider">Modul Simulasi Evaluasi</span>
+                      <div className="flex flex-col">
+                        <span className="text-[10px] font-black text-sky-600 uppercase tracking-wider">Metode Deteksi Lokasi</span>
+                        <span className="text-[9px] text-slate-400 font-semibold">
+                          {isSimulationMode ? "Simulasi Pengujian Jarak" : "GPS Real Perangkat Aktif"}
+                        </span>
+                      </div>
                       <label className="relative inline-flex items-center cursor-pointer">
                         <input type="checkbox" checked={isSimulationMode} onChange={(e) => handleGpsSourceChange(!e.target.checked)} className="sr-only peer" />
-                        <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-200 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-sky-500 shadow-inner"></div>
+                        <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-200 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500 shadow-inner"></div>
                       </label>
                     </div>
 
@@ -887,9 +1008,9 @@
                         <input type="range" min="0" max="100" defaultValue="0" onChange={(e) => handleSimulationSlider(parseInt(e.target.value))} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-sky-500" />
                       </div>
                     ) : (
-                      <div className="flex items-center justify-between text-[10px] text-slate-500">
-                        <span>Menggunakan GPS Real Perangkat</span>
-                        <button onClick={requestRealGpsLocation} className="text-sky-600 font-bold hover:underline">Refresh GPS</button>
+                      <div className="flex items-center justify-between text-[10px] text-slate-500 gap-2">
+                        <span className="truncate">Menggunakan sensor satelit ponsel Anda</span>
+                        <button onClick={requestRealGpsLocation} className="text-sky-600 font-bold hover:underline shrink-0 bg-sky-50 px-2 py-1 rounded-lg">Refresh GPS</button>
                       </div>
                     )}
                   </div>
@@ -904,7 +1025,7 @@
                   <button onClick={() => setCurrentTab('jurnal')} className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${currentTab === 'jurnal' ? 'bg-gradient-to-r from-sky-600 to-emerald-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-800 hover:bg-white/60'}`}>
                     <FileTextIcon /> Jurnal KBM
                   </button>
-                  <button onClick={() => setCurrentTab('laporan')} className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${currentTab === 'laporan' ? 'bg-gradient-to-r from-sky-600 to-emerald-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-800 hover:bg-white/60'}`}>
+                  <button onClick={() => { setCurrentTab('laporan'); }} className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${currentTab === 'laporan' ? 'bg-gradient-to-r from-sky-600 to-emerald-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-800 hover:bg-white/60'}`}>
                     <AwardIcon /> Laporan Bulanan
                   </button>
                 </div>
@@ -918,6 +1039,13 @@
                       <h3 className="font-extrabold text-xs text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2 w-full text-left">
                         <CameraIcon /> Verifikasi Swafoto & Radius
                       </h3>
+
+                      {/* INDIKATOR ERROR GPS PERANGKAT */}
+                      {gpsError && !isSimulationMode && (
+                        <div className="w-full mb-3 p-3 bg-rose-50 border border-rose-100 rounded-2xl text-[11px] text-rose-700 font-semibold leading-relaxed">
+                          ⚠️ {gpsError}
+                        </div>
+                      )}
 
                       <div className="w-full aspect-[4/3] bg-slate-50 border border-slate-200 rounded-2xl relative overflow-hidden flex flex-col items-center justify-center shadow-inner">
                         {isCameraActive ? (
@@ -963,14 +1091,24 @@
                           <span className="text-slate-500">Target Lokasi:</span>
                           <span className="text-slate-800 font-bold">{schoolCoords.name}</span>
                         </div>
-                        <div className="flex justify-between border-b border-slate-200 pb-1.5">
+                        <div className="flex justify-between border-b border-slate-200 pb-1.5 items-center">
                           <span className="text-slate-500">Koordinat Saat Ini:</span>
-                          <span className="text-slate-800">{gpsCoords.latitude.toFixed(6)}, {gpsCoords.longitude.toFixed(6)}</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-slate-800 font-semibold">{gpsCoords.latitude.toFixed(6)}, {gpsCoords.longitude.toFixed(6)}</span>
+                            <a 
+                              href={`https://www.google.com/maps?q=${gpsCoords.latitude},${gpsCoords.longitude}`} 
+                              target="_blank" 
+                              rel="noopener noreferrer" 
+                              className="bg-sky-100 hover:bg-sky-200 text-sky-700 px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wide"
+                            >
+                              Peta 🌍
+                            </a>
+                          </div>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-slate-500">Status Radius:</span>
                           <span className={`font-bold ${isInsideSchool ? 'text-emerald-600' : 'text-rose-600'}`}>
-                            {distanceToSchool.toFixed(1)}m ({isInsideSchool ? 'DI DALAM' : 'DI LUAR'})
+                            {distanceToSchool.toFixed(1)}m ({isInsideSchool ? 'DI DALAM' : 'DI LUAR AREA'})
                           </span>
                         </div>
                       </div>
@@ -1209,7 +1347,19 @@
                                   <span className={`text-[8px] px-2 py-0.5 rounded-full font-black uppercase ${item.jenis === 'Masuk' ? 'bg-sky-100 text-sky-600' : 'bg-emerald-100 text-emerald-600'}`}>{item.jenis}</span>
                                   <span className={`text-[8px] px-2 py-0.5 rounded-full font-black uppercase ${item.status === 'Terlambat' ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600'}`}>{item.status}</span>
                                 </h4>
-                                <p className="text-[10px] text-slate-500 mt-1 font-mono">NIP. {item.nip} • Jarak: {item.lokasi}</p>
+                                <p className="text-[10px] text-slate-500 mt-1 font-mono flex items-center gap-2">
+                                  <span>NIP. {item.nip} • Jarak: {item.lokasi}</span>
+                                  {item.latitude && item.longitude && (
+                                    <a 
+                                      href={`https://www.google.com/maps?q=${item.latitude},${item.longitude}`} 
+                                      target="_blank" 
+                                      rel="noopener noreferrer" 
+                                      className="text-sky-600 font-bold hover:underline"
+                                    >
+                                      [Lihat Peta 🌍]
+                                    </a>
+                                  )}
+                                </p>
                                 <p className="text-[9px] text-slate-400 mt-0.5 font-mono">{item.tanggal} • {item.waktu}</p>
                               </div>
                             </div>
@@ -1336,8 +1486,8 @@
                         <input type="number" required className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-800 outline-none font-mono focus:ring-2 focus:ring-amber-500/20" value={tempRadius} onChange={(e) => setTempRadius(e.target.value)} />
                       </div>
                       <div>
-                        <label className="text-[10px] font-bold text-amber-600 block mb-1 uppercase font-mono">Web App URL Google Sheets API</label>
-                        <input type="text" required className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-800 outline-none font-mono focus:ring-2 focus:ring-amber-500/20" value={tempSheetApiUrl} onChange={(e) => setTempSheetApiUrl(e.target.value)} />
+                        <label className="text-[10px] font-bold text-emerald-600 block mb-1 uppercase font-mono">Web App URL Google Sheets API</label>
+                        <input type="text" required className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-800 outline-none font-mono focus:ring-2 focus:ring-emerald-500/20" value={tempSheetApiUrl} onChange={(e) => setTempSheetApiUrl(e.target.value)} />
                         <p className="text-[9px] text-slate-400 mt-1">Sematkan URL Web App Google Apps Script Anda yang baru di atas.</p>
                       </div>
 
@@ -1396,6 +1546,7 @@
       );
     }
 
+    // KOMPONEN LEMBAR CETAK LAPORAN
     function ReportSheet({ data, schoolConfig }) {
       const { guru, absen, jurnal, stats } = data;
 
